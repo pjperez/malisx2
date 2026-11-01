@@ -411,10 +411,48 @@ static const struct vk_device_extension_table mali_device_extensions = {
    .KHR_create_renderpass2 = true,
 };
 
+/*
+ * The Mali-G52 (v7) is a Vulkan 1.3 device for hakuX, which keeps its
+ * in-pass target reads (fbfetch) and its extended dynamic state paths for
+ * 1.3 devices with VK_KHR_dynamic_rendering_local_read. What 1.3 made
+ * core is there as far as hakuX uses it: synchronization2 (the driver's
+ * barrier and submit are the 2 forms; the runtime has the 1.0 ones),
+ * dynamic rendering, the dynamic states of VK_EXT_extended_dynamic_state
+ * and _2 (pipelines with dynamic state repack their words at the draw,
+ * mali_cmd_state.h mali_gfx_update_dirty), private data (runtime),
+ * demote to helper invocation (Mesa's Bifrost backend). Not all of 1.3:
+ * no host query reset, no buffer device address, no maintenance4 entry
+ * points, no inline uniform blocks, no subgroup size control; their
+ * features are reported off. Other arches stay 1.1.
+ */
+static uint32_t
+api_version_for_arch(uint32_t arch)
+{
+   return arch == 7 ? VK_MAKE_API_VERSION(0, 1, 3, VK_HEADER_VERSION) : MALI_API_VERSION;
+}
+
 static struct vk_device_extension_table
 device_extensions_for_arch(uint32_t arch)
 {
    struct vk_device_extension_table ext = mali_device_extensions;
+   if (arch == 7) {
+      /* Reads of the bound colour and depth attachments inside a dynamic
+       * rendering pass: input attachments are tile reads already
+       * (mali_nir_lower_input_attachments.c, panvk's scheme, with the
+       * input attachment map from the runtime's
+       * vkCmdSetRenderingInputAttachmentIndices), and a by-region
+       * barrier inside a pass is a draw with a primitive barrier
+       * (mali_jm_cmd_buffer.c). */
+      ext.KHR_dynamic_rendering_local_read = true;
+      ext.KHR_synchronization2 = true;
+      ext.EXT_extended_dynamic_state = true;
+      ext.EXT_extended_dynamic_state2 = true;
+      ext.EXT_vertex_input_dynamic_state = true;
+      ext.EXT_shader_demote_to_helper_invocation = true;
+      ext.EXT_descriptor_indexing = true;
+      ext.KHR_maintenance3 = true;
+      ext.EXT_private_data = true;
+   }
    return ext;
 }
 
@@ -557,6 +595,34 @@ get_features(struct vk_features *f, uint32_t arch)
        * and which requires all three names. */
       .dynamicRendering = true,
    };
+
+   if (arch == 7) {
+      /* Vulkan 1.3 on v7 (api_version_for_arch). */
+      f->synchronization2 = true;
+      f->privateData = true;
+      f->shaderDemoteToHelperInvocation = true;
+      f->dynamicRenderingLocalRead = true;
+      /* VK_EXT_extended_dynamic_state, _2 and vertex input dynamic
+       * state: the runtime keeps the state; a pipeline with dynamic
+       * state repacks its words from it at the draw. No logic op and no
+       * patch control points (no logicOp, no tessellation). */
+      f->extendedDynamicState = true;
+      f->extendedDynamicState2 = true;
+      f->extendedDynamicState2LogicOp = false;
+      f->extendedDynamicState2PatchControlPoints = false;
+      f->vertexInputDynamicState = true;
+      /* Descriptor indexing, the part hakuX enables on a 1.3 device.
+       * v7 copies a stage's descriptors from the sets into its tables by
+       * a copy job when the draw runs, so writes after the bind are what
+       * it copies; unwritten descriptors are copied but not read; non-
+       * uniform indices are lowered to loops (mali_shader.c). The update-
+       * after-bind limits are the ordinary ones (get_properties), which
+       * on v7 are far below a bindless table. */
+      f->runtimeDescriptorArray = true;
+      f->descriptorBindingPartiallyBound = true;
+      f->descriptorBindingSampledImageUpdateAfterBind = true;
+      f->shaderSampledImageArrayNonUniformIndexing = true;
+   }
 }
 
 /* The sample counts we report. Rendering is single-sampled (mali_fb.c) and
@@ -677,7 +743,7 @@ get_properties(const struct mali_physical_device *pdev, const char *name,
    const char *const driver_info = driver_info_for_arch(p->arch_major);
 
    *props = (struct vk_properties) {
-      .apiVersion = MALI_API_VERSION,
+      .apiVersion = api_version_for_arch(p->arch_major),
       .driverVersion = driver_version,
       .vendorID = MALI_VENDOR_ID,
       .deviceID = (uint32_t)p->gpu_id,
@@ -873,6 +939,46 @@ get_properties(const struct mali_physical_device *pdev, const char *name,
       props->maxDescriptorSetSampledImages = UINT16_MAX;
       props->maxDescriptorSetStorageImages = 1u << 8;
       props->subgroupSize = 8;
+
+      /* Descriptor indexing (get_features): update-after-bind limits are
+       * the ordinary ones. */
+      props->maxUpdateAfterBindDescriptorsInAllPools = UINT32_MAX / 2;
+      props->shaderSampledImageArrayNonUniformIndexingNative = false;
+      props->maxPerStageDescriptorUpdateAfterBindSamplers = props->maxPerStageDescriptorSamplers;
+      props->maxPerStageDescriptorUpdateAfterBindUniformBuffers =
+         props->maxPerStageDescriptorUniformBuffers;
+      props->maxPerStageDescriptorUpdateAfterBindStorageBuffers =
+         props->maxPerStageDescriptorStorageBuffers;
+      props->maxPerStageDescriptorUpdateAfterBindSampledImages =
+         props->maxPerStageDescriptorSampledImages;
+      props->maxPerStageDescriptorUpdateAfterBindStorageImages =
+         props->maxPerStageDescriptorStorageImages;
+      props->maxPerStageDescriptorUpdateAfterBindInputAttachments =
+         props->maxPerStageDescriptorInputAttachments;
+      props->maxPerStageUpdateAfterBindResources = props->maxPerStageResources;
+      props->maxDescriptorSetUpdateAfterBindSamplers = props->maxDescriptorSetSamplers;
+      props->maxDescriptorSetUpdateAfterBindUniformBuffers = props->maxDescriptorSetUniformBuffers;
+      props->maxDescriptorSetUpdateAfterBindUniformBuffersDynamic =
+         props->maxDescriptorSetUniformBuffersDynamic;
+      props->maxDescriptorSetUpdateAfterBindStorageBuffers = props->maxDescriptorSetStorageBuffers;
+      props->maxDescriptorSetUpdateAfterBindStorageBuffersDynamic =
+         props->maxDescriptorSetStorageBuffersDynamic;
+      props->maxDescriptorSetUpdateAfterBindSampledImages = props->maxDescriptorSetSampledImages;
+      props->maxDescriptorSetUpdateAfterBindStorageImages = props->maxDescriptorSetStorageImages;
+      props->maxDescriptorSetUpdateAfterBindInputAttachments =
+         props->maxDescriptorSetInputAttachments;
+
+      /* VK_EXT_extended_dynamic_state3 is not offered; local read's two
+       * dynamic attachment maps are the runtime's. VK_EXT_vertex_input
+       * dynamic state has no properties. Vulkan 1.3 limits. */
+      props->maxBufferSize = 1ull << 31;
+      props->maxInlineUniformBlockSize = 0;
+      props->minSubgroupSize = 8;
+      props->maxSubgroupSize = 8;
+      props->maxComputeWorkgroupSubgroups = props->maxComputeWorkGroupInvocations / 8;
+      props->requiredSubgroupSizeStages = 0;
+      props->dynamicRenderingLocalReadDepthStencilAttachments = true;
+      props->dynamicRenderingLocalReadMultisampledAttachments = false;
    }
 
    snprintf(props->deviceName, sizeof(props->deviceName), "%s", name);
