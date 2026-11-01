@@ -1228,6 +1228,12 @@ MALI_PER_ARCH(device_init)(struct mali_device *dev)
    mali_kbase_jm_atom_ids_init(&jd->ids);
    jd->free_ids = mali_kbase_jm_atom_ids_free_count(&jd->ids);
    mali_jm_heap_init(jd);
+#if PAN_ARCH < 9
+   /* Opt-in only: hakuX's uniform ring is host-coherent, uncached memory,
+    * where every word read on the CPU is a trip to DRAM; on the G52 that
+    * made vkCmdDrawIndexed 4.3 -> 7.5 us. */
+   jd->v7_ubo_cpu = mali_debug_flag("ubocpu");
+#endif
 
    dev->jm = jd;
    dev->fe = jd;

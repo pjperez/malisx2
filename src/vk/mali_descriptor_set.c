@@ -306,9 +306,17 @@ write_dynamic_buffer(struct mali_descriptor_set *set, const VkDescriptorBufferIn
    if (buffer) {
       set->dyn_bufs[idx].addr = mali_buffer_gpu_va(buffer, info->offset);
       set->dyn_bufs[idx].range = vk_buffer_range(&buffer->vk, info->offset, info->range);
+      /* The same test as for a v7 index buffer (mali_cmd_state.c). */
+      const VkMemoryPropertyFlags props = buffer->mem ? buffer->mem->props : 0;
+      set->dyn_bufs[idx].host = (props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+                                !(props & (VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT |
+                                           VK_MEMORY_PROPERTY_PROTECTED_BIT)) &&
+                                buffer->mem->bo.cpu &&
+                                (uint64_t)(uintptr_t)buffer->mem->bo.cpu == buffer->mem->bo.gpu_va;
    } else {
       set->dyn_bufs[idx].addr = MALI_NULL_BUFFER_ADDR;
       set->dyn_bufs[idx].range = 0;
+      set->dyn_bufs[idx].host = false;
    }
 }
 

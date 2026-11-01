@@ -705,6 +705,55 @@ build_ubo_copy_nir(struct mali_device *dev)
    return b.shader;
 }
 
+/*
+ * The copy job's work done on the CPU when the draw is recorded, for
+ * applications that write a draw's uniform data before recording it
+ * (mali_jm_device::v7_ubo_cpu): the words are read from the buffers' CPU
+ * views and written into the FAU block, both at their GPU addresses
+ * (SAME_VA), and the draw has no copy job, its Vertex job no dependency.
+ * The same assumption the v7 index range scan makes of index buffers.
+ * False, and nothing written, when a source buffer has no CPU view.
+ */
+static bool
+ubo_copy_cpu(const struct mali_shader *s, const struct mali_desc_state *desc, uint64_t fau_va)
+{
+   const uint32_t n = s->fau.ubo_push_count;
+   uint32_t words[2 * MALI_MAX_UBO_PUSH_FAUS];
+   uint32_t dyn_cached = UINT32_MAX;
+   const uint8_t *base = NULL;
+   uint64_t range = 0;
+   for (uint32_t i = 0; i < n; i++) {
+      const struct mali_ubo_push_word *w = &s->fau.ubo_push[i];
+      if (w->dyn != dyn_cached) {
+         dyn_cached = w->dyn;
+         base = NULL;
+         range = 0;
+         if (w->dyn < s->v7.dyn_ubo_count) {
+            uint32_t set, idx;
+            const struct mali_descriptor_set *ds =
+               dyn_set(desc, s->desc.dyn_bufs.map[w->dyn], &set, &idx);
+            if (ds && ds->dyn_bufs[idx].range && ds->dyn_bufs[idx].addr != MALI_NULL_BUFFER_ADDR) {
+               if (!ds->dyn_bufs[idx].host)
+                  return false;
+               base = (const uint8_t *)(uintptr_t)(ds->dyn_bufs[idx].addr +
+                                                   desc->dyn_offsets[set][idx]);
+               range = ds->dyn_bufs[idx].range;
+            }
+         }
+      }
+      for (unsigned h = 0; h < 2; h++) {
+         const uint64_t off = w->offset + 4 * h;
+         uint32_t v = 0;
+         if (base && off + 4 <= range)
+            memcpy(&v, base + off, 4);
+         words[2 * i + h] = v;
+      }
+   }
+   memcpy((void *)(uintptr_t)(fau_va + (uint64_t)s->fau.ubo_push_start * MALI_FAU_WORD_SIZE),
+          words, 2 * n * sizeof(uint32_t));
+   return true;
+}
+
 bool
 mali_v7_ubo_copy(struct mali_cmd_buffer *cmd, struct mali_jm_chain *c, const struct mali_shader *s,
                  const struct mali_desc_state *desc, uint64_t fau_va, uint16_t dep, uint16_t *index)
@@ -713,6 +762,8 @@ mali_v7_ubo_copy(struct mali_cmd_buffer *cmd, struct mali_jm_chain *c, const str
    if (index)
       *index = dep;
    if (!n || !fau_va)
+      return true;
+   if (cmd->dev->jm->v7_ubo_cpu && ubo_copy_cpu(s, desc, fau_va))
       return true;
    const struct mali_shader *copy =
       get_copy_shader(cmd, &cmd->dev->jm->v7_ubo_copy, build_ubo_copy_nir, "mali-v7-ubo-copy");

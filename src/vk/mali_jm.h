@@ -912,6 +912,11 @@ struct mali_jm_device {
    struct mali_shader *v7_desc_copy;
    /* The uniform buffer word copy shader (mali_v7_ubo_copy), the same way. */
    struct mali_shader *v7_ubo_copy;
+   /* Pushed uniform buffer words are read on the CPU when the draw is
+    * recorded, not copied by a job (mali_jm_desc_v7.c ubo_copy_cpu), with
+    * the debug switch "ubocpu", for an application that writes a draw's
+    * uniform data before recording it into host-cached memory. */
+   bool v7_ubo_cpu;
    /* How many of mali_device::free_slabs are 1 MiB slabs for large blocks
     * (mali_jm_cmd_buffer.c); under mali_device::slab_lock. */
    unsigned free_big_slabs;

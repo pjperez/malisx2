@@ -715,6 +715,23 @@ v7_ubo_push_range_cmp(const void *a, const void *b)
    return (int)x->first - (int)y->first;
 }
 
+/*
+ * Vertex shaders that read their dynamic uniform buffers with loads, as
+ * compiled, instead of pushing the words into FAU. The push costs every
+ * draw whose buffer offset changed a copy job that its Vertex job waits
+ * for, a few microseconds of the vtc chain on the G52; the loads cost a
+ * load/store message per warp, and a draw of hakuX's has a few dozen
+ * vertices, a handful of warps. hakuX moves its constant buffer's offset
+ * every other draw, and the vtc chain is its frame's critical path. For
+ * hakuX; the debug switch vsubopush keeps the push.
+ */
+static bool
+v7_vs_reads_ubos(const struct mali_device *dev)
+{
+   const char *app = dev->vk.physical->instance->app_info.app_name;
+   return app && !strcmp(app, "hakuX-hle") && !mali_debug_flag("vsubopush");
+}
+
 static void
 lower_ubo_push(nir_shader *nir, struct mali_shader *s)
 {
@@ -1649,6 +1666,12 @@ compile_nir(struct mali_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_shader_instructions_pass, fau_tex_handle,
             nir_metadata_control_flow, s);
    lower_load_push_consts(nir, s);
+#if PAN_ARCH == 7
+   if (nir->info.stage == MESA_SHADER_VERTEX && v7_vs_reads_ubos(dev)) {
+      s->fau.ubo_push_start = s->fau.total_count;
+      s->fau.ubo_push_count = 0;
+   } else
+#endif
    lower_ubo_push(nir, s);
 
    /* The driver's words come first; the backend may put promoted

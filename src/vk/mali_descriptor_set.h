@@ -81,6 +81,10 @@ struct mali_descriptor_set {
    struct {
       uint64_t addr;
       uint64_t range;
+      /* Host-visible memory with a CPU view: on the job manager its GPU
+       * address is its CPU address (SAME_VA), which v7 reads pushed
+       * uniform words from (mali_v7_ubo_copy). */
+      bool host;
    } dyn_bufs[MALI_MAX_DYNAMIC_BUFFERS];
 };
 
