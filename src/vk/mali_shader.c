@@ -823,6 +823,13 @@ MALI_PER_ARCH(shader_spirv_options)(const struct vk_pipeline_robustness_state *r
       .shared_addr_format = nir_address_format_32bit_offset,
       .min_ubo_alignment = 16,
       .min_ssbo_alignment = 16,
+#if PAN_ARCH == 7
+      /* RelaxedPrecision (GLSL mediump) arithmetic in 16 bits, as Turnip
+       * does: Bifrost runs fp16 at twice the fp32 rate (two halves per
+       * lane) in half the registers, and a fragment shader over 32
+       * registers halves the warps a core keeps. Derivatives stay 32-bit. */
+      .mediump_16bit_alu = true,
+#endif
       /* In debug builds vtn raises SIGTRAP on a parse failure unless told
        * not to; we want the error return. */
       .skip_os_break_in_debug_build = true,
