@@ -172,9 +172,14 @@ mali_v7_rsd_shader(const struct pan_shader_info *info, uint64_t code,
       rsd->properties.shader_wait_dependency_7 = info->bifrost.wait_7;
       mali_v7_message_preload(&rsd->message_preload_1, &info->bifrost.messages[0]);
       mali_v7_message_preload(&rsd->message_preload_2, &info->bifrost.messages[1]);
-   } else if (info->stage == MESA_SHADER_VERTEX) {
-      /* Compiled without IDVS (mali_shader.c). */
-      assert(!info->vs.secondary_enable);
+   } else if (info->stage == MESA_SHADER_VERTEX && info->vs.secondary_enable) {
+      /* IDVS: the varying part follows the position part in the binary
+       * and reads the same FAU block (pan_shader_prepare_bifrost_rsd). */
+      rsd->secondary_preload.uniform_count = rsd->preload.uniform_count;
+      mali_v7_preload(info->stage, info->vs.secondary_preload, &rsd->secondary_preload);
+      rsd->secondary_shader = code + info->vs.secondary_offset;
+      rsd->properties.secondary_shader_register_allocation =
+         mali_v7_register_allocation(info->vs.secondary_work_reg_count);
    }
 }
 

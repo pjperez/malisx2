@@ -296,8 +296,9 @@ job_is_tiler_side(enum mali_job_type type)
           type == MALI_JOB_TYPE_TILER;
 #else
    /* v7 has no Malloc Vertex or Fullscreen jobs: a draw is a Vertex job
-    * (compute side) and a Tiler job that depends on it. */
-   return type == MALI_JOB_TYPE_TILER;
+    * (compute side) and a Tiler job that depends on it, or one Indexed
+    * Vertex job (IDVS, mali_jm_cmd_draw_v7.c). */
+   return type == MALI_JOB_TYPE_TILER || type == MALI_JOB_TYPE_INDEXED_VERTEX;
 #endif
 }
 
