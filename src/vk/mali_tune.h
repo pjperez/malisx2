@@ -1,0 +1,42 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ARMSX2 and bmdhacks
+ * SPDX-License-Identifier: MIT
+ */
+#pragma once
+
+#include <stdint.h>
+
+/*
+ * Switches for measuring what an optimisation is worth on a game, and
+ * diagnostics: the comma-separated words of MALISX2_TUNE or, on Android,
+ * the property debug.malisx2.tune, read when a device is created (one
+ * device a process, like mali_crc_options). Unset, every optimisation is
+ * on and every diagnostic off. The words that change compiled shaders are
+ * part of the shaders' cache keys.
+ *   noubopush    no uniform-buffer words pushed into FAU (v7 lower_ubo_push)
+ *   noloadalign  v7: 4-byte aligned vec4 global loads split into four
+ *                32-bit loads, as the compiler's alignment rule says
+ *   nocrc        no transaction elimination (mali_crc_options.disable)
+ * and ones that are off unless named:
+ *   passlog      v7 diagnostic: every 20 s, the passes of the next ~150 ms
+ *                with their draws' shaders, blending and vertex counts, and
+ *                every 2 s the shader compiles, in logcat
+ *   deplog       diagnostic: every 2 s, how many vtc atoms had to wait for
+ *                fragment work still running, and why (mali_jm_queue.c),
+ *                and the barriers that made them (mali_jm_cmd_buffer.c)
+ *   shaderstats  diagnostic: each shader read back from the pipeline cache
+ *                logged with its code size, registers, thread storage
+ *                (spills) and interface counts
+ */
+enum mali_tune_off {
+   MALI_TUNE_NO_UBO_PUSH = 1u << 0,
+   MALI_TUNE_NO_LOAD_ALIGN = 1u << 1,
+   MALI_TUNE_NO_CRC = 1u << 2,
+   MALI_TUNE_PASSLOG = 1u << 3,
+   MALI_TUNE_DEPLOG = 1u << 4,
+   MALI_TUNE_SHADERSTATS = 1u << 5,
+};
+extern uint32_t mali_tune_off __attribute__((visibility("hidden")));
+/* Read the words and set mali_tune_off and mali_crc_options.disable
+ * (mali_image.c). */
+void mali_tune_init(void);

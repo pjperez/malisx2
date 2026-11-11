@@ -42,6 +42,7 @@
 #include "genxml/gen_macros.h"
 
 #include "mali_shader.h"
+#include "mali_tune.h"
 #if PAN_ARCH >= 10
 #include "mali_cs.h"
 #endif
@@ -759,7 +760,8 @@ lower_ubo_push(nir_shader *nir, struct mali_shader *s)
    s->fau.ubo_push_count = 0;
 
    if ((nir->info.stage != MESA_SHADER_FRAGMENT && nir->info.stage != MESA_SHADER_VERTEX) ||
-       !s->v7.dyn_ubo_count || s->fau.total_count >= V7_UBO_PUSH_FAU_LIMIT)
+       !s->v7.dyn_ubo_count || s->fau.total_count >= V7_UBO_PUSH_FAU_LIMIT ||
+       (mali_tune_off & MALI_TUNE_NO_UBO_PUSH))
       return;
 
    struct v7_ubo_push_ctx ctx = {
@@ -1842,7 +1844,8 @@ compile_nir(struct mali_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_shader_alu_pass, drop_trunc_before_f2i,
             nir_metadata_control_flow, NULL);
 #if PAN_ARCH < 9
-   NIR_PASS(_, nir, nir_shader_intrinsics_pass, v7_vec4_load_align, nir_metadata_all, NULL);
+   if (!(mali_tune_off & MALI_TUNE_NO_LOAD_ALIGN))
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, v7_vec4_load_align, nir_metadata_all, NULL);
 #endif
    pan_postprocess_nir(nir, &inputs, &s->info);
 
@@ -2645,6 +2648,18 @@ shader_deserialize(struct vk_pipeline_cache *cache, const void *key_data,
    if (shader_upload(dev, s) != VK_SUCCESS)
       goto fail;
 
+   if (unlikely(mali_tune_off & MALI_TUNE_SHADERSTATS)) {
+      const uint8_t *k = key_data;
+      mesa_logi("malisx2 shaderstats: %s %02x%02x%02x%02x code %u regs %u tls %u fau %u idvs %d "
+                "secondary regs %u attribs %u varyings %u textures %u discard %d clipdist %u",
+                stage == MESA_SHADER_VERTEX ? "vs" : stage == MESA_SHADER_FRAGMENT ? "fs" : "cs",
+                k[0], k[1], k[2], k[3], s->bin_size, s->info.work_reg_count, s->info.tls_size,
+                s->info.fau.count, stage == MESA_SHADER_VERTEX && s->info.vs.idvs,
+                stage == MESA_SHADER_VERTEX ? s->info.vs.secondary_work_reg_count : 0,
+                s->info.attribute_count, s->info.varyings.formats.count, s->info.texture_count,
+                stage == MESA_SHADER_FRAGMENT && s->info.fs.can_discard,
+                stage == MESA_SHADER_VERTEX ? (unsigned)util_bitcount(s->info.outputs_written & (BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0) | BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST1))) : 0);
+   }
    return &s->base;
 
 fail:

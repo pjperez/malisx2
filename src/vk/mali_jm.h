@@ -416,6 +416,15 @@ struct mali_jm_cmd {
       uint64_t ib, ib_size;
       uint32_t first, count, min, max;
    } idx_last;
+   /* passlog (mali_tune.h): this pass's draws, the first 48. */
+   struct mali_v7_plog {
+      uint64_t vs, fs;           /* the first 8 bytes of the shader keys */
+      uint32_t vs_size, fs_size; /* machine code bytes */
+      uint32_t count, range, instances;
+      uint8_t rt_read, rt_written, blend_shader, blend_ff, blend_opaque;
+      bool dest, idvs, discard;
+   } plog[48];
+   uint32_t plog_n, plog_draws;
    /* The Local Storage descriptor of the copy jobs (mali_jm_desc_v7.c
     * copy_tsd), 0 until the first one. */
    uint64_t copy_tsd;
@@ -948,6 +957,10 @@ uint64_t mali_v7_meta_viewport(struct mali_cmd_buffer *cmd, uint32_t minx, uint3
  * set.
  */
 void mali_v7_note_buffer_write(struct mali_cmd_buffer *cmd, uint64_t addr, uint64_t size);
+
+/* passlog (mali_tune.h): at the end of a pass, log it and its draws when
+ * the sampling window is open, and forget its draws. */
+void mali_v7_passlog_pass(struct mali_cmd_buffer *cmd);
 
 /*
  * The varying arena of a command buffer's indirect draws: one block, a

@@ -75,6 +75,8 @@
 #include "mali_queue.h"
 #endif
 #include "mali_vk.h"
+#include "mali_tune.h"
+#include "util/log.h"
 
 /* ---------------------------------------------------------------------- */
 /* Surfaces                                                                */
@@ -458,6 +460,13 @@ copy_to_buffer_frag(struct mali_cmd_buffer *cmd, const struct mali_image *img, u
        src->block_bytes > 16 || !w || !h)
       return false;
    const bool afbc = mali_image_is_afbc(img);
+   if (unlikely(mali_tune_off & MALI_TUNE_DEPLOG)) {
+      static bool once;
+      if (!once) {
+         once = true;
+         mesa_logi("malisx2 deplog: image -> buffer copy on the fragment side");
+      }
+   }
 
    struct mali_meta_fs_key key = {
       .copy_src_tex = afbc,
@@ -532,6 +541,13 @@ copy_to_image_frag(struct mali_cmd_buffer *cmd, const struct mali_image *img, un
        !w || !h)
       return false;
 
+   if (unlikely(mali_tune_off & MALI_TUNE_DEPLOG)) {
+      static bool once;
+      if (!once) {
+         once = true;
+         mesa_logi("malisx2 deplog: buffer -> image copy on the fragment side");
+      }
+   }
    struct mali_meta_fs_key key = {
       .copy_elem_log2 = util_logbase2(dst->block_bytes),
    };
@@ -1070,6 +1086,13 @@ blit_layers_v7(struct mali_cmd_buffer *cmd, const struct mali_image *src,
    if (one_to_one && one_to_one_on_fragment(cmd, src, dst)) {
       /* The blit pass at texel centres, nearest: the same texels. */
       filter = VK_FILTER_NEAREST;
+      if (unlikely(mali_tune_off & MALI_TUNE_DEPLOG)) {
+         static bool once;
+         if (!once) {
+            once = true;
+            mesa_logi("malisx2 deplog: one-to-one blit or copy on the fragment side");
+         }
+      }
    } else if (one_to_one) {
       u_foreach_bit(a, aspects) {
          const VkImageAspectFlags aspect = BITFIELD_BIT(a);

@@ -11,6 +11,7 @@
  */
 
 #include "mali_vk.h"
+#include "mali_tune.h"
 
 #ifndef __ANDROID__
 /* The WSI's image create info (WSI_IMAGE_CREATE_INFO_MESA): a VK_KHR_display
@@ -23,6 +24,10 @@
 #include "mali_cmd_gfx.h"
 
 #include <stdlib.h>
+#include <string.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 #include "drm-uapi/drm_fourcc.h"
 #include "util/format/u_format.h"
@@ -436,6 +441,51 @@ struct mali_crc_options mali_crc_options = {
    .empty_tile_read = true,
    .empty_tile_write = true,
 };
+
+uint32_t mali_tune_off;
+
+void
+mali_tune_init(void)
+{
+   const char *s = getenv("MALISX2_TUNE");
+#ifdef __ANDROID__
+   char prop[PROP_VALUE_MAX] = "";
+   if (!s || !*s) {
+      if (__system_property_get("debug.malisx2.tune", prop) > 0)
+         s = prop;
+   }
+#endif
+   static const struct {
+      const char *word;
+      uint32_t bit;
+   } words[] = {
+      {"noubopush", MALI_TUNE_NO_UBO_PUSH},
+      {"nocrc", MALI_TUNE_NO_CRC},
+      {"passlog", MALI_TUNE_PASSLOG},
+      {"deplog", MALI_TUNE_DEPLOG},
+      {"shaderstats", MALI_TUNE_SHADERSTATS},
+      {"noloadalign", MALI_TUNE_NO_LOAD_ALIGN},
+   };
+   uint32_t off = 0;
+   for (const char *p = s; p && *p;) {
+      const char *end = strchr(p, ',');
+      const size_t len = end ? (size_t)(end - p) : strlen(p);
+      bool known = false;
+      for (unsigned i = 0; i < ARRAY_SIZE(words); i++) {
+         if (len == strlen(words[i].word) && !strncmp(p, words[i].word, len)) {
+            off |= words[i].bit;
+            known = true;
+         }
+      }
+      if (!known && len)
+         mesa_logw("malisx2: tune: unknown word \"%.*s\"", (int)len, p);
+      p = end ? end + 1 : NULL;
+   }
+   mali_tune_off = off;
+   mali_crc_options.disable = off & MALI_TUNE_NO_CRC;
+   if (off)
+      mesa_logi("malisx2: tune: off 0x%x (%s)", off, s);
+}
 
 /*
  * Start the image's CRC state from zero: seed 0 and a table of zeros, as

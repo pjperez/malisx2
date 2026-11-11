@@ -10,6 +10,7 @@
  */
 
 #include "mali_vk.h"
+#include "mali_tune.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -407,6 +408,8 @@ mali_CreateDevice(VkPhysicalDevice physicalDevice,
    }
    /* Timing and capture, when MALISX2_MEASURE asks for them. */
    mali_measure_init(dev);
+   /* Optimisations turned off for measuring, diagnostics (mali_tune.h). */
+   mali_tune_init();
 
    const struct vk_pipeline_cache_create_info mem_cache_info = {
       .weak_ref = true,

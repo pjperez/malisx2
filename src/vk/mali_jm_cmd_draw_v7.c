@@ -64,6 +64,7 @@
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
+#include <inttypes.h>
 
 #include "panfrost/compiler/pan_nir.h"
 #include "util/blend.h"
@@ -1377,6 +1378,105 @@ emit_tiler_job(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di,
       mali_v7_link_tilers(cmd, 0);
 }
 
+/* ---------------------------------------------------------------------- */
+/* passlog (mali_tune.h): a diagnostic, off unless named                   */
+
+static uint64_t
+key64(const struct mali_shader *s)
+{
+   uint64_t k = 0;
+   if (s)
+      memcpy(&k, s->key, sizeof(k));
+   return k;
+}
+
+static void
+passlog_draw(struct mali_cmd_buffer *cmd, const struct mali_graphics_pipeline *p,
+             const struct mali_draw_info *di, const struct draw_data *dd)
+{
+   struct mali_jm_cmd *jm = &cmd->jm;
+   jm->plog_draws++;
+   if (jm->plog_n == ARRAY_SIZE(jm->plog))
+      return;
+   const struct mali_gfx_baked *b = &p->baked;
+   struct mali_v7_plog *l = &jm->plog[jm->plog_n++];
+   memset(l, 0, sizeof(*l));
+   l->vs = key64(p->vs);
+   l->fs = key64(p->fs);
+   l->vs_size = p->vs ? p->vs->bin_size : 0;
+   l->fs_size = p->fs ? p->fs->bin_size : 0;
+   l->count = di->count;
+   l->range = dd->vertex_range;
+   l->instances = di->instance_count;
+   l->rt_read = b->rt_read;
+   l->rt_written = b->rt_written;
+   l->dest = b->any_dest_read;
+   l->idvs = p->vs->info.vs.idvs;
+   l->discard = p->fs && p->fs->info.fs.can_discard;
+   for (unsigned i = 0; i < MIN2(b->rt_count, 8); i++) {
+      l->blend_shader |= (b->blend[i].mode == MALI_BLEND_RT_SHADER) << i;
+      l->blend_ff |= (b->blend[i].mode == MALI_BLEND_RT_FIXED_FUNCTION) << i;
+      l->blend_opaque |= (b->blend[i].mode == MALI_BLEND_RT_OPAQUE) << i;
+   }
+}
+
+void
+mali_v7_passlog_pass(struct mali_cmd_buffer *cmd)
+{
+   struct mali_jm_cmd *jm = &cmd->jm;
+   static int64_t next_ms, window_end_ms;
+   static unsigned window;
+   const struct mali_render_state *r = &cmd->gfx.render;
+   const int64_t now = os_time_get_nano() / 1000000;
+   if (now >= next_ms) {
+      next_ms = now + 20000;
+      window_end_ms = now + 150;
+      window++;
+   }
+   /* Shader compiles as they happen, every 2 s: a compile during play is a
+    * stall the pipeline cache should have saved. */
+   static int64_t compiles_ms;
+   static uint32_t compiles_seen;
+   if (now >= compiles_ms + 2000) {
+      const uint32_t c = p_atomic_read(&cmd->dev->pipeline_stats.shaders_compiled);
+      if (c != compiles_seen)
+         mesa_logi("malisx2 passlog compiles: +%u in %.1f s (%u in all, cache hits %u)",
+                   c - compiles_seen, (now - compiles_ms) / 1000.0, c,
+                   p_atomic_read(&cmd->dev->pipeline_stats.shader_cache_hits));
+      compiles_seen = c;
+      compiles_ms = now;
+   }
+   if (now < window_end_ms && jm->plog_draws) {
+      static const char load[] = "dcl";
+      const struct mali_render_desc *d = &r->desc;
+      char rts[64] = "";
+      for (unsigned i = 0; i < MIN2(d->rt_count, 4); i++) {
+         const struct mali_fb_target *t = &d->rt[i];
+         char one[16];
+         snprintf(one, sizeof(one), " rt%u:%c%s%s", i, t->image ? load[t->load % 3] : '-',
+                  t->store ? "s" : "", t->preload ? "p" : "");
+         strncat(rts, one, sizeof(rts) - strlen(rts) - 1);
+      }
+      mesa_logi("malisx2 passlog %u: pass %ux%u draws %u%s z:%c%s s:%c%s (shaders compiled %u, "
+                "cache hits %u)",
+                window, d->width, d->height, jm->plog_draws, rts,
+                d->z.image ? load[d->z.load % 3] : '-', d->z.store ? "s" : "",
+                d->s.image ? load[d->s.load % 3] : '-', d->s.store ? "s" : "",
+                p_atomic_read(&cmd->dev->pipeline_stats.shaders_compiled),
+                p_atomic_read(&cmd->dev->pipeline_stats.shader_cache_hits));
+      for (unsigned i = 0; i < jm->plog_n; i++) {
+         const struct mali_v7_plog *l = &jm->plog[i];
+         mesa_logi("malisx2 passlog %u:   vs %016" PRIx64 " %u fs %016" PRIx64
+                   " %u rt w%x r%x blend sh%x ff%x op%x dest%d discard%d idx %u range %u inst %u%s",
+                   window, l->vs, l->vs_size, l->fs, l->fs_size, l->rt_written, l->rt_read,
+                   l->blend_shader, l->blend_ff, l->blend_opaque, l->dest, l->discard, l->count,
+                   l->range, l->instances, l->idvs ? " idvs" : "");
+      }
+   }
+   jm->plog_n = 0;
+   jm->plog_draws = 0;
+}
+
 static void
 draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di)
 {
@@ -1472,6 +1572,8 @@ draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di)
    /* Rasterizer discard: the Vertex job alone, as in panvk, which keeps
     * the Tiler job only for an occlusion query. */
    const bool tiling = !st->rs.rasterizer_discard_enable;
+   if (unlikely(mali_tune_off & MALI_TUNE_PASSLOG))
+      passlog_draw(cmd, p, di, &dd);
 
    /* The Invocation of both jobs (panvk_cmd_draw): (1, vertex range,
     * instances) workgroups of one invocation, with the graphics quirks. */

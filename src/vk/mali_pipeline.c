@@ -39,6 +39,7 @@
 #endif
 
 #include "mali_blend.h"
+#include "mali_tune.h"
 #include "mali_pipeline.h"
 #if PAN_ARCH >= 10
 #include "mali_cmd_buffer.h"
@@ -867,7 +868,9 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
       vs->keep_outputs = 0;
    }
 
-   /* Keys. */
+   /* Keys. The tune words that change compiled shaders are in both. */
+   const uint32_t tune =
+      mali_tune_off & (MALI_TUNE_NO_UBO_PUSH | MALI_TUNE_NO_LOAD_ALIGN);
    struct mesa_blake3 h;
    const uint32_t view_mask = state.mv ? state.mv->view_mask : 0;
 
@@ -877,6 +880,7 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
    hash_layout(&h, layout);
    _mesa_blake3_update(&h, &view_mask, sizeof(view_mask));
    _mesa_blake3_update(&h, &vs->keep_outputs, sizeof(vs->keep_outputs));
+   _mesa_blake3_update(&h, &tune, sizeof(tune));
    _mesa_blake3_final(&h, vs->key);
 
    if (fs) {
@@ -886,6 +890,7 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
       hash_layout(&h, layout);
       _mesa_blake3_update(&h, vs->stage_hash, sizeof(vs->stage_hash));
       hash_fs_state(&h, dev, &state);
+      _mesa_blake3_update(&h, &tune, sizeof(tune));
       _mesa_blake3_final(&h, fs->key);
    }
 

@@ -553,6 +553,10 @@ MALI_PER_ARCH(cmd_render_end)(struct mali_cmd_buffer *cmd)
    }
    if (!vk_command_buffer_has_error(&cmd->vk))
       MALI_PER_ARCH(cmd_oq_pass_end)(cmd);
+#if PAN_ARCH < 9
+   if (unlikely(mali_tune_off & MALI_TUNE_PASSLOG))
+      mali_v7_passlog_pass(cmd);
+#endif
 
    if (unlikely(cmd->jm.measure)) {
       const uint32_t w = r->desc.width, h = r->desc.height;

@@ -68,6 +68,7 @@
 
 #include "mali_cmd_state.h"
 
+#include <inttypes.h>
 #include <stdalign.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +80,9 @@
 #include "vk_synchronization.h"
 
 #include "mali_measure.h"
+#include "mali_tune.h"
+#include "util/os_time.h"
+#include "util/simple_mtx.h"
 
 /* ---------------------------------------------------------------------- */
 /* Memory                                                                  */
@@ -980,6 +984,55 @@ static uint16_t
 barrier_req(VkPipelineStageFlags2 src_stages, VkPipelineStageFlags2 dst_stages,
             VkAccessFlags2 dst_access);
 
+/* deplog (mali_tune.h): the barriers that make the next vtc atom wait for
+ * every earlier fragment atom, by stages and accesses, every 2 s. */
+static struct {
+   simple_mtx_t lock;
+   uint64_t t0;
+   unsigned n;
+   struct {
+      uint64_t src, dst, srca, dsta;
+      uint32_t kinds, count;
+   } e[16];
+} barlog = {.lock = SIMPLE_MTX_INITIALIZER};
+
+static void
+barlog_note(VkPipelineStageFlags2 src, VkAccessFlags2 srca, VkPipelineStageFlags2 dst,
+            VkAccessFlags2 dsta, uint32_t kinds)
+{
+   simple_mtx_lock(&barlog.lock);
+   unsigned i = 0;
+   for (; i < barlog.n; i++) {
+      if (barlog.e[i].src == src && barlog.e[i].dst == dst && barlog.e[i].srca == srca &&
+          barlog.e[i].dsta == dsta && barlog.e[i].kinds == kinds)
+         break;
+   }
+   if (i == barlog.n && barlog.n < ARRAY_SIZE(barlog.e)) {
+      barlog.e[i].src = src;
+      barlog.e[i].dst = dst;
+      barlog.e[i].srca = srca;
+      barlog.e[i].dsta = dsta;
+      barlog.e[i].kinds = kinds;
+      barlog.e[i].count = 0;
+      barlog.n++;
+   }
+   if (i < barlog.n)
+      barlog.e[i].count++;
+   const uint64_t now = os_time_get_nano();
+   if (!barlog.t0)
+      barlog.t0 = now;
+   if (now - barlog.t0 >= 2000000000ull) {
+      for (unsigned j = 0; j < barlog.n; j++)
+         mesa_logi("malisx2 deplog barrier: %u x src 0x%" PRIx64 " / 0x%" PRIx64
+                   " -> dst 0x%" PRIx64 " / 0x%" PRIx64 " (mem/buf/img/internal 0x%x)",
+                   barlog.e[j].count, barlog.e[j].src, barlog.e[j].srca, barlog.e[j].dst,
+                   barlog.e[j].dsta, barlog.e[j].kinds);
+      barlog.n = 0;
+      barlog.t0 = now;
+   }
+   simple_mtx_unlock(&barlog.lock);
+}
+
 void
 mali_jm_cmd_barrier(struct mali_cmd_buffer *cmd, VkPipelineStageFlags2 src_stages,
                     VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stages,
@@ -987,6 +1040,8 @@ mali_jm_cmd_barrier(struct mali_cmd_buffer *cmd, VkPipelineStageFlags2 src_stage
 {
    (void)src_access;
    const uint16_t req = barrier_req(src_stages, dst_stages, dst_access);
+   if (unlikely(mali_tune_off & MALI_TUNE_DEPLOG) && (req & REQ_VTC_AFTER_FRAG))
+      barlog_note(src_stages, src_access, dst_stages, dst_access, 8);
    cmd->jm.req |= req;
 #if PAN_ARCH < 9
    /* Not known to be about images only (mali_jm_cmd::xvtc_buf). */
@@ -1250,6 +1305,11 @@ MALI_PER_ARCH(CmdPipelineBarrier2)(VkCommandBuffer commandBuffer,
       srca |= m->srcAccessMask;
       dsta |= m->dstAccessMask;
    }
+#if PAN_ARCH < 9
+   /* The buffer and global dependencies, for the barrier log. */
+   const VkPipelineStageFlags2 buf_src = src, buf_dst = dst;
+   const VkAccessFlags2 buf_srca = srca, buf_dsta = dsta;
+#endif
    for (uint32_t i = 0; i < info->imageMemoryBarrierCount; i++) {
       const VkImageMemoryBarrier2 *m = &info->pImageMemoryBarriers[i];
 #if PAN_ARCH < 9
@@ -1282,6 +1342,10 @@ MALI_PER_ARCH(CmdPipelineBarrier2)(VkCommandBuffer commandBuffer,
 #if PAN_ARCH < 9
    /* The global and buffer dependencies keep the full rule; the image ones
     * apply to the vtc jobs that can touch images. */
+   if (unlikely(mali_tune_off & MALI_TUNE_DEPLOG) && (buf_req & REQ_VTC_AFTER_FRAG))
+      barlog_note(buf_src, buf_srca, buf_dst, buf_dsta,
+                  (info->memoryBarrierCount ? 1 : 0) | (info->bufferMemoryBarrierCount ? 2 : 0) |
+                     (info->imageMemoryBarrierCount ? 4 : 0));
    cmd->jm.req |= buf_req | img_req;
    if (buf_req & REQ_XVTC_ALL)
       cmd->jm.xvtc_buf = true;

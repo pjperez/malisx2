@@ -459,6 +459,8 @@ struct mali_crc_options {
  * reads it from another file addresses it directly, not through the GOT. */
 extern struct mali_crc_options mali_crc_options __attribute__((visibility("hidden")));
 
+#include "mali_tune.h"
+
 /* A render-target Blend descriptor's words for a colour target (the
  * internal part the fragment shader's BLEND instruction reads;
  * mali_fb.c). */

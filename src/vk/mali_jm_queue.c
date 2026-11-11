@@ -117,6 +117,7 @@
 #include "vk_log.h"
 
 #include "mali_measure.h"
+#include "mali_tune.h"
 
 /* One JOB_SUBMIT's worth of atoms being built. jc of a soft fence atom
  * points at its fences[] entry, which the kernel reads (and, for
@@ -912,6 +913,69 @@ build_event(struct mali_device *dev, struct mali_jm_queue *q, const struct mali_
    return w;
 }
 
+/* deplog (mali_tune.h): per vtc atom, which of its fragment-slot
+ * requirements were atoms not yet known done, by reason. */
+enum deplog_reason {
+   DEP_SEM,     /* semaphore waits, carried end-of-command-buffer gates */
+   DEP_BARRIER, /* vtc_after_frag = earlier, or a carried barrier */
+   DEP_XFER,    /* after the earlier fragment transfer */
+   DEP_INTRA,   /* after a given batch's fragment work (same command buffer) */
+   DEP_HEAP,    /* the last fragment reader of its tiler heap slot */
+   DEP_XVTC,    /* a carried transfer-only requirement */
+   DEP_IVTC,    /* a carried image barrier requirement */
+   DEP_COUNT,
+};
+static const char *const deplog_name[DEP_COUNT] = {"sem", "barrier", "xfer", "intra",
+                                                   "heap", "xvtc", "ivtc"};
+static struct {
+   uint64_t t0;
+   uint32_t vtc, waited, newest, submits;
+   uint32_t by[DEP_COUNT], decided[DEP_COUNT];
+} deplog;
+
+static void
+deplog_vtc(struct mali_jm_device *jd, struct mali_jm_queue *q, const mali_jm_ref *why,
+           mali_jm_ref req)
+{
+   deplog.vtc++;
+   if (!req || !mali_jm_ref_live(jd, req))
+      return;
+   deplog.waited++;
+   if (req == q->last[MALI_JM_SLOT_FRAG])
+      deplog.newest++;
+   bool first = true;
+   for (unsigned r = 0; r < DEP_COUNT; r++) {
+      if (!why[r] || !mali_jm_ref_live(jd, why[r]))
+         continue;
+      deplog.by[r]++;
+      if (why[r] == req && first) {
+         deplog.decided[r]++;
+         first = false;
+      }
+   }
+}
+
+static void
+deplog_flush(void)
+{
+   deplog.submits++;
+   const uint64_t now = os_time_get_nano();
+   if (!deplog.t0)
+      deplog.t0 = now;
+   if (now - deplog.t0 < 2000000000ull)
+      return;
+   char buf[256];
+   int n = 0;
+   for (unsigned r = 0; r < DEP_COUNT; r++)
+      n += snprintf(buf + n, sizeof(buf) - n, " %s %u/%u", deplog_name[r], deplog.decided[r],
+                    deplog.by[r]);
+   mesa_logi("malisx2 deplog: %u submits, %u vtc atoms, %u waited for running fragment work "
+             "(%u for the newest); decided/any:%s",
+             deplog.submits, deplog.vtc, deplog.waited, deplog.newest, buf);
+   memset(&deplog, 0, sizeof(deplog));
+   deplog.t0 = now;
+}
+
 /* The atom graph of the submit's waits and command buffers (file
  * comment). With dev->lock held and the build begun. batch_frag has room
  * for the largest command buffer's batch count, allocated before the
@@ -989,16 +1053,23 @@ build_submit(struct mali_device *dev, struct vk_queue_submit *submit, mali_jm_re
 
          if (bt->vtc.first) {
             mali_jm_ref req = frag_req;
+            mali_jm_ref why[DEP_COUNT] = {0};
+            why[DEP_SEM] = frag_req;
             if (bt->vtc_after_frag == MALI_JM_AFTER_EARLIER ||
                 (q->carry & MALI_JM_REQ_VTC_AFTER_FRAG)) {
                req = newer(req, q->last[MALI_JM_SLOT_FRAG]);
+               why[DEP_BARRIER] = q->last[MALI_JM_SLOT_FRAG];
             } else {
                if (bt->vtc_after_frag == MALI_JM_AFTER_EARLIER_XFER ||
-                   (q->carry & MALI_JM_REQ_VTC_AFTER_FRAG_XFER))
+                   (q->carry & MALI_JM_REQ_VTC_AFTER_FRAG_XFER)) {
                   req = newer(req, q->last_frag_xfer);
+                  why[DEP_XFER] = q->last_frag_xfer;
+               }
                if (bt->vtc_after_frag && bt->vtc_after_frag < MALI_JM_AFTER_EARLIER_XFER &&
-                   bt->vtc_after_frag - 1u < k)
+                   bt->vtc_after_frag - 1u < k) {
                   req = newer(req, batch_frag[bt->vtc_after_frag - 1u]);
+                  why[DEP_INTRA] = batch_frag[bt->vtc_after_frag - 1u];
+               }
             }
             if (bt->heap_slot >= 0 && bt->heap_slot < MALI_JM_HEAP_SLOTS_MAX) {
                const mali_jm_ref h = q->heap_last_frag[bt->heap_slot];
@@ -1007,6 +1078,7 @@ build_submit(struct mali_device *dev, struct vk_queue_submit *submit, mali_jm_re
                if (h && mali_jm_ref_live(jd, h) && newer(req, h) == h && req != h)
                   q->submit_heap_waits++;
                req = newer(req, h);
+               why[DEP_HEAP] = h;
                q->submit_tiled++;
             }
             /* A transfer-only requirement carried from an earlier command
@@ -1019,8 +1091,10 @@ build_submit(struct mali_device *dev, struct vk_queue_submit *submit, mali_jm_re
                /* A copy into a fresh image owes only a buffer barrier's. */
                owed |= bt->vtc_fresh && q->xvtc_buf;
 #endif
-               if (owed)
+               if (owed) {
                   req = newer(req, q->xvtc_frag);
+                  why[DEP_XVTC] = q->xvtc_frag;
+               }
                if (req && newer(req, q->xvtc_frag) == req) {
                   q->xvtc_frag = 0;
 #if PAN_ARCH < 9
@@ -1032,12 +1106,16 @@ build_submit(struct mali_device *dev, struct vk_queue_submit *submit, mali_jm_re
             /* The same for an image barrier's requirement, owed to the
              * chains that can touch images. */
             if (q->ivtc_frag) {
-               if (bt->vtc_img)
+               if (bt->vtc_img) {
                   req = newer(req, q->ivtc_frag);
+                  why[DEP_IVTC] = q->ivtc_frag;
+               }
                if (req && newer(req, q->ivtc_frag) == req)
                   q->ivtc_frag = 0;
             }
 #endif
+            if (unlikely(mali_tune_off & MALI_TUNE_DEPLOG))
+               deplog_vtc(jd, q, why, req);
             vtc = mali_jm_build_atom(dev, MALI_JM_ATOM_VTC, MALI_JM_SLOT_VTC,
                                      MALI_JM_REQ_VTC | chain_req(&bt->vtc), bt->vtc.first,
                                      NULL, ud, q->last[MALI_JM_SLOT_VTC], req, &result);
@@ -1197,6 +1275,8 @@ MALI_PER_ARCH(queue_submit)(struct vk_queue *vkq, struct vk_queue_submit *submit
    q->submit_tiled = 0;
    q->submit_heap_waits = 0;
    result = build_submit(dev, submit, batch_frag);
+   if (unlikely(mali_tune_off & MALI_TUNE_DEPLOG))
+      deplog_flush();
    free(batch_frag);
    mali_jm_ref tracker = 0;
    bool built = false;
