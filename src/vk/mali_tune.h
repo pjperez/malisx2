@@ -27,6 +27,11 @@
  *   shaderstats  diagnostic: each shader read back from the pipeline cache
  *                logged with its code size, registers, thread storage
  *                (spills) and interface counts
+ *   idvs         v7: application pipelines also get their vertex shader
+ *                split for index-driven vertex shading, and a direct draw
+ *                of at least MALI_V7_IDVS_MIN_RANGE vertices runs it as an
+ *                Indexed Vertex job (mali_jm_cmd_draw_v7.c); smaller,
+ *                indirect and rasterizer-discard draws keep the plain one
  */
 enum mali_tune_off {
    MALI_TUNE_NO_UBO_PUSH = 1u << 0,
@@ -35,6 +40,7 @@ enum mali_tune_off {
    MALI_TUNE_PASSLOG = 1u << 3,
    MALI_TUNE_DEPLOG = 1u << 4,
    MALI_TUNE_SHADERSTATS = 1u << 5,
+   MALI_TUNE_IDVS = 1u << 6,
 };
 extern uint32_t mali_tune_off __attribute__((visibility("hidden")));
 /* Read the words and set mali_tune_off and mali_crc_options.disable

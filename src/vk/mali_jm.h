@@ -295,6 +295,8 @@ struct mali_jm_draw_tmpl {
    uint32_t prim0;          /* Primitive word 0 without index type and provoking vertex */
    uint32_t dcd0;           /* Draw word 0: the baked culling / front face / flat bits */
    uint64_t vs_rsd;         /* the vertex shader's Renderer State Descriptor */
+   uint64_t vs_idvs_rsd;    /* the IDVS vertex shader's (pipeline vs_idvs), 0 without one */
+   uint32_t idvs_prim0;     /* Primitive word 0 bits an IDVS draw adds (its varying shader) */
    uint64_t fs_code;        /* the fragment shader's code address, 0 without one */
    uint64_t vs_vary;        /* varying Attribute descriptors the vertex shader writes */
    uint64_t fs_vary;        /* ... and the fragment shader reads */

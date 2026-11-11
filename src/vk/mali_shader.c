@@ -1947,8 +1947,9 @@ v7_fixup_info(struct mali_device *dev, const nir_shader *nir, struct mali_shader
       const uint32_t generic =
          (s->info.attributes_read & VERT_BIT_GENERIC_ALL) >> VERT_ATTRIB_GENERIC0;
       s->info.attribute_count = util_last_bit(generic);
-      /* bi_should_idvs() honours no_idvs (shader_compile). */
-      assert(!s->info.vs.idvs && !s->info.vs.secondary_enable);
+      /* bi_should_idvs() honours no_idvs (shader_compile): a varying
+       * shader only comes with IDVS. */
+      assert(s->info.vs.idvs || !s->info.vs.secondary_enable);
    } else {
       s->info.attribute_count = 0;
    }
@@ -2320,11 +2321,12 @@ MALI_PER_ARCH(shader_compile)(struct mali_device *dev,
       .robust_modes = robust_modes,
       .robust_descriptors = dev->vk.enabled_features.nullDescriptor,
 #if PAN_ARCH < 9
-      /* One plain vertex shader per Vertex job, no IDVS pair: the v7 draw
-       * is a Vertex and a Tiler job (mali_jm_cmd_draw_v7.c), the form
-       * Mesa also uses on Bifrost when the shader writes gl_PointSize
-       * (bi_should_idvs). */
-      .no_idvs = true,
+      /* A plain vertex shader per Vertex job unless an application
+       * pipeline asked for IDVS (mali_tune.h idvs): then the compiler
+       * splits it into a position and a varying shader when it can
+       * (bi_should_idvs: not when it writes gl_PointSize), and the draw is
+       * an Indexed Vertex job (mali_jm_cmd_draw_v7.c). */
+      .no_idvs = !info->idvs,
 #endif
    };
    struct pan_varying_layout varying_layout;

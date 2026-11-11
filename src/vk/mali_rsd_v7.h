@@ -137,8 +137,9 @@ mali_v7_message_preload(struct MALI_MESSAGE_PRELOAD *cfg, const struct bifrost_m
  * pan_shader_prepare_rsd for Bifrost: the shader's own fields. `code` is
  * the GPU address of the machine code (0 in the pipeline bake, which
  * keeps only the state words). The counts are the ones the compile
- * patched (mali_shader.c v7_fixup_info). Vertex shaders are compiled
- * without IDVS, so there is no secondary shader.
+ * patched (mali_shader.c v7_fixup_info). A vertex shader compiled for
+ * IDVS (mali_tune.h idvs) has a secondary, varying shader behind its
+ * position shader, which shares its FAU block.
  */
 static inline void
 mali_v7_rsd_shader(const struct pan_shader_info *info, uint64_t code,
@@ -172,9 +173,12 @@ mali_v7_rsd_shader(const struct pan_shader_info *info, uint64_t code,
       rsd->properties.shader_wait_dependency_7 = info->bifrost.wait_7;
       mali_v7_message_preload(&rsd->message_preload_1, &info->bifrost.messages[0]);
       mali_v7_message_preload(&rsd->message_preload_2, &info->bifrost.messages[1]);
-   } else if (info->stage == MESA_SHADER_VERTEX) {
-      /* Compiled without IDVS (mali_shader.c). */
-      assert(!info->vs.secondary_enable);
+   } else if (info->stage == MESA_SHADER_VERTEX && info->vs.secondary_enable) {
+      rsd->secondary_preload.uniform_count = rsd->preload.uniform_count;
+      mali_v7_preload(info->stage, info->vs.secondary_preload, &rsd->secondary_preload);
+      rsd->secondary_shader = code ? code + info->vs.secondary_offset : 0;
+      rsd->properties.secondary_shader_register_allocation =
+         mali_v7_register_allocation(info->vs.secondary_work_reg_count);
    }
 }
 

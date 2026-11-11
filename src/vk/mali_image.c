@@ -465,6 +465,7 @@ mali_tune_init(void)
       {"deplog", MALI_TUNE_DEPLOG},
       {"shaderstats", MALI_TUNE_SHADERSTATS},
       {"noloadalign", MALI_TUNE_NO_LOAD_ALIGN},
+      {"idvs", MALI_TUNE_IDVS},
    };
    uint32_t off = 0;
    for (const char *p = s; p && *p;) {

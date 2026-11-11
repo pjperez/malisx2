@@ -81,6 +81,7 @@ graphics_pipeline_destroy(struct vk_device *vk_dev, struct vk_pipeline *vk_pipel
    struct mali_graphics_pipeline *p = mali_graphics_pipeline(vk_pipeline);
 
    MALI_PER_ARCH(shader_unref)(dev, p->vs);
+   MALI_PER_ARCH(shader_unref)(dev, p->vs_idvs);
    MALI_PER_ARCH(shader_unref)(dev, p->fs);
    if (p->zsd_mem.size)
       mali_bo_pool_free(&dev->desc_pool, &p->zsd_mem);
@@ -152,6 +153,8 @@ struct stage {
    /* Vertex stage: the generic varying slots the fragment stage reads (~0: all, for a
     * pipeline whose fragment stage is unknown). */
    uint64_t keep_outputs;
+   /* v7: compile the vertex stage for IDVS (mali_tune.h idvs). */
+   bool idvs;
 };
 
 static struct vk_pipeline_cache *
@@ -420,6 +423,32 @@ strip_unused_outputs(nir_shader *nir, uint64_t keep)
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 }
 
+#if PAN_ARCH == 7
+/* The IDVS split of a vertex shader is interchangeable with the plain one
+ * at a draw (mali_jm_cmd_draw_v7.c): the same FAU words, descriptor tables,
+ * constant data, attributes and varyings. */
+static bool
+v7_idvs_matches(const struct mali_shader *plain, const struct mali_shader *idvs)
+{
+   const struct pan_shader_info *a = &plain->info, *b = &idvs->info;
+   const struct mali_v7_shader_desc *x = &plain->v7, *y = &idvs->v7;
+   return b->vs.idvs && !a->vs.idvs &&
+          !memcmp(&plain->fau, &idvs->fau, sizeof(plain->fau)) &&
+          !memcmp(&plain->desc, &idvs->desc, sizeof(plain->desc)) &&
+          !memcmp(x->count, y->count, sizeof(x->count)) &&
+          x->dyn_ubo_count == y->dyn_ubo_count && x->map_count == y->map_count &&
+          (!x->map_count || !memcmp(x->map, y->map, x->map_count * sizeof(*x->map))) &&
+          x->needs_set_addrs == y->needs_set_addrs && x->copy_set_mask == y->copy_set_mask &&
+          x->direct_set == y->direct_set && x->direct_slots == y->direct_slots &&
+          x->data_size == y->data_size && (!x->data_size || !memcmp(x->data, y->data, x->data_size)) &&
+          a->attribute_count == b->attribute_count && a->texture_count == b->texture_count &&
+          a->sampler_count == b->sampler_count && a->ubo_count == b->ubo_count &&
+          a->varyings.formats.count == b->varyings.formats.count &&
+          !memcmp(&a->varyings.formats, &b->varyings.formats, sizeof(a->varyings.formats)) &&
+          a->vs.writes_point_size == b->vs.writes_point_size;
+}
+#endif
+
 static VkResult
 stage_compile(struct mali_device *dev, struct vk_pipeline_cache *cache,
               VkPipelineCreateFlags2KHR flags, struct stage *st,
@@ -441,6 +470,7 @@ stage_compile(struct mali_device *dev, struct vk_pipeline_cache *cache,
       .layout = layout,
       .state = state,
       .vs_varying_layout = vs_varying_layout,
+      .idvs = st->idvs,
    };
    st->nir = NULL; /* consumed */
 
@@ -813,6 +843,11 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
    struct vk_pipeline_cache *cache = pick_cache(dev, cache_handle);
    struct stage stages[2];
    struct stage *vs = NULL, *fs = NULL;
+#if PAN_ARCH == 7
+   /* the IDVS vertex stage (mali_tune.h idvs), released at out */
+   struct stage vsi;
+   memset(&vsi, 0, sizeof(vsi));
+#endif
 #if PAN_ARCH != 9
    /* The fragment shader that only clips (clip_fs_compile), if needed. */
    struct stage clip = {0};
@@ -871,6 +906,9 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
    /* Keys. The tune words that change compiled shaders are in both. */
    const uint32_t tune =
       mali_tune_off & (MALI_TUNE_NO_UBO_PUSH | MALI_TUNE_NO_LOAD_ALIGN);
+   /* The IDVS vertex stage (below) is keyed with the bit; the plain one
+    * without, so turning idvs on keeps every plain vertex shader cached. */
+   const uint32_t vs_tune = tune;
    struct mesa_blake3 h;
    const uint32_t view_mask = state.mv ? state.mv->view_mask : 0;
 
@@ -880,7 +918,7 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
    hash_layout(&h, layout);
    _mesa_blake3_update(&h, &view_mask, sizeof(view_mask));
    _mesa_blake3_update(&h, &vs->keep_outputs, sizeof(vs->keep_outputs));
-   _mesa_blake3_update(&h, &tune, sizeof(tune));
+   _mesa_blake3_update(&h, &vs_tune, sizeof(vs_tune));
    _mesa_blake3_final(&h, vs->key);
 
    if (fs) {
@@ -915,6 +953,40 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
       if (result != VK_SUCCESS)
          goto out;
    }
+#if PAN_ARCH == 7
+   /* mali_tune.h idvs: the same vertex stage split for IDVS, for the draws
+    * that gain from it (mali_jm_cmd_draw_v7.c). Kept only when the compiler
+    * split it and it reads and writes what the plain one does. */
+   if (fs && (mali_tune_off & MALI_TUNE_IDVS)) {
+      vsi = *vs;
+      vsi.nir = NULL;
+      vsi.shader = NULL;
+      vsi.idvs = true;
+      const uint32_t idvs_tune = tune | MALI_TUNE_IDVS;
+      _mesa_blake3_init(&h);
+      _mesa_blake3_update(&h, "vs", 2);
+      _mesa_blake3_update(&h, vs->stage_hash, sizeof(vs->stage_hash));
+      hash_layout(&h, layout);
+      _mesa_blake3_update(&h, &view_mask, sizeof(view_mask));
+      _mesa_blake3_update(&h, &vs->keep_outputs, sizeof(vs->keep_outputs));
+      _mesa_blake3_update(&h, &idvs_tune, sizeof(idvs_tune));
+      _mesa_blake3_final(&h, vsi.key);
+      if (!stage_lookup(dev, cache, &vsi)) {
+         if (flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR) {
+            result = VK_PIPELINE_COMPILE_REQUIRED;
+            goto out;
+         }
+         if (stage_compile(dev, cache, flags, &vsi, layout, &state, NULL) != VK_SUCCESS) {
+            stage_finish(dev, &vsi);
+            vsi.shader = NULL;
+         }
+      }
+      if (vsi.shader && !v7_idvs_matches(vs->shader, vsi.shader)) {
+         MALI_PER_ARCH(shader_unref)(dev, vsi.shader);
+         vsi.shader = NULL;
+      }
+   }
+#endif
 #if PAN_ARCH != 9
    if (!fs && vs_writes_clip_distances(vs->shader)) {
       clip_fs_key(dev, &state, vs->shader, clip.key);
@@ -945,6 +1017,10 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
       p->base.layout = vk_pipeline_layout_ref(layout);
    p->vs = vs->shader;
    vs->shader = NULL;
+#if PAN_ARCH == 7
+   p->vs_idvs = vsi.shader;
+   vsi.shader = NULL;
+#endif
    if (fs) {
       p->fs = fs->shader;
       fs->shader = NULL;
@@ -974,6 +1050,9 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
       .view_mask = view_mask,
    };
    MALI_PER_ARCH(gfx_pack_state)(&pack, &p->baked);
+   /* The draw's TLS serves whichever vertex shader it runs. */
+   if (p->vs_idvs)
+      p->baked.tls_size = MAX2(p->baked.tls_size, p->vs_idvs->info.tls_size);
    MALI_PER_ARCH(blend_shaders_prepare)(dev, p);
 
    result = fill_bind(dev, p);
@@ -992,6 +1071,9 @@ out:
       stage_finish(dev, &stages[i]);
 #if PAN_ARCH != 9
    stage_finish(dev, &clip);
+#endif
+#if PAN_ARCH == 7
+   stage_finish(dev, &vsi);
 #endif
    return result;
 }

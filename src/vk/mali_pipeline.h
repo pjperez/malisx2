@@ -195,6 +195,10 @@ struct mali_graphics_pipeline {
 
    struct mali_shader *vs;              /* reference */
    struct mali_shader *fs;              /* reference, NULL without a fragment stage */
+   /* v7 (mali_tune.h idvs): the vertex shader split for IDVS, for the draws
+    * large enough to gain from it; NULL when there is none. It reads the
+    * same descriptors and FAU words and writes the same varyings as vs. */
+   struct mali_shader *vs_idvs;         /* reference */
    struct mali_bo_ref zsd_mem;          /* bind.zsd */
 
    /* Which states are dynamic (MESA_VK_DYNAMIC_*). */

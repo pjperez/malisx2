@@ -961,6 +961,12 @@ prepare_draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di, struc
       t->vs_rsd = bd->spd[0];
       t->fs_code = bd->spd[2];
       assert(t->vs_rsd);
+      /* mali_tune.h idvs: the IDVS split of the vertex shader, its RSD like
+       * the plain one's (points or not), and the Primitive's Secondary Shader
+       * bit (word 0 bit 18, genxml v7.xml) when it has a varying shader. */
+      const struct mali_shader *vsi = p->vs_idvs;
+      t->vs_idvs_rsd = vsi ? vsi->spd[bk->prim == MESA_PRIM_POINTS ? MALI_SPD_POS_POINTS : MALI_SPD_POS_TRIANGLES] : 0;
+      t->idvs_prim0 = (vsi && vsi->info.vs.secondary_enable && p->fs) ? 1u << 18 : 0;
    }
    /* A query that begins or ends changes the RSD only for a shader whose
     * early-ZS choice it changes. */
@@ -1282,11 +1288,33 @@ index_range(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di, bool r
  * (mali_v7_link_tilers): behind a later draw's Vertex job, in front of any
  * other job, or when the batch closes.
  */
+/* The smallest vertex range a draw runs as an Indexed Vertex job when its
+ * pipeline has an IDVS vertex shader (mali_tune.h idvs). In WipEout 2048 the
+ * draws of 256 or more vertices are 8% of the draws and 74% of the
+ * vertices. */
+#define MALI_V7_IDVS_MIN_RANGE 256
+
+/* The tiler sections of a draw's job: a Tiler job, or the first 256 bytes
+ * of an Indexed Vertex job, which are a Tiler job's sections at the same
+ * offsets with the Draw as its Fragment Draw (genxml v7.xml). */
+static_assert(pan_section_offset(INDEXED_VERTEX_JOB, INVOCATION) ==
+                 pan_section_offset(TILER_JOB, INVOCATION) &&
+              pan_section_offset(INDEXED_VERTEX_JOB, PRIMITIVE) ==
+                 pan_section_offset(TILER_JOB, PRIMITIVE) &&
+              pan_section_offset(INDEXED_VERTEX_JOB, PRIMITIVE_SIZE) ==
+                 pan_section_offset(TILER_JOB, PRIMITIVE_SIZE) &&
+              pan_section_offset(INDEXED_VERTEX_JOB, TILER) ==
+                 pan_section_offset(TILER_JOB, TILER) &&
+              pan_section_offset(INDEXED_VERTEX_JOB, PADDING) ==
+                 pan_section_offset(TILER_JOB, PADDING) &&
+              pan_section_offset(INDEXED_VERTEX_JOB, FRAGMENT_DRAW) ==
+                 pan_section_offset(TILER_JOB, DRAW),
+              "an Indexed Vertex job starts with a Tiler job's sections");
+
 static inline __attribute__((always_inline)) void
-emit_tiler_job(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di,
-               const struct draw_data *dd, const struct mali_invocation_packed *invocation,
-               uint32_t instance_size, uint16_t vertex_index, bool defer, struct mali_ptr tj,
-               bool ns)
+fill_tiler_sections(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di,
+                    const struct draw_data *dd, const struct mali_invocation_packed *invocation,
+                    uint32_t instance_size, struct mali_ptr tj, uint32_t prim0_extra)
 {
    const struct mali_gfx_draw_state *d = &cmd->gfx.draw;
    const struct mali_render_state *r = &cmd->gfx.render;
@@ -1311,7 +1339,7 @@ emit_tiler_job(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di,
    const enum mali_index_type index_type =
       di->indexed ? mali_gfx_index_type(d->ib.index_size) : MALI_INDEX_TYPE_NONE;
    prim.opaque[0] = (t->prim0 & ~prim_provoking_bit()) | prim_index_type(index_type) |
-                    (r->first_provoking_vertex ? prim_provoking_bit() : 0);
+                    (r->first_provoking_vertex ? prim_provoking_bit() : 0) | prim0_extra;
    if (cmd->jm.depth_cull & VK_DEPTH_CULL_OVERRIDE_BIT_MALISX2) {
       /* vkCmdSetDepthCullMALISX2: the Primitive's Low and High Depth Cull
        * (word 0 bits 16 and 17, genxml v7.xml); outside them the depth is
@@ -1367,6 +1395,15 @@ emit_tiler_job(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di,
    }
    dcd.opaque[0] |= t->dcd0;
    memcpy(pan_section_ptr(tj.cpu, TILER_JOB, DRAW), &dcd, sizeof(dcd));
+}
+
+static inline __attribute__((always_inline)) void
+emit_tiler_job(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di,
+               const struct draw_data *dd, const struct mali_invocation_packed *invocation,
+               uint32_t instance_size, uint16_t vertex_index, bool defer, struct mali_ptr tj,
+               bool ns)
+{
+   fill_tiler_sections(cmd, di, dd, invocation, instance_size, tj, 0);
 
    assert(cmd->jm.pend_tilers < MALI_V7_TILER_DEFER);
    cmd->jm.pend_tiler[cmd->jm.pend_tilers] = tj;
@@ -1477,6 +1514,28 @@ mali_v7_passlog_pass(struct mali_cmd_buffer *cmd)
    jm->plog_draws = 0;
 }
 
+/* The vertex shader's Draw descriptor (panvk_emit_vertex_dcd): a Vertex
+ * job's Draw or an Indexed Vertex job's Vertex Draw. */
+static inline __attribute__((always_inline)) void
+emit_vertex_dcd(const struct mali_jm_draw_tmpl *t, const struct draw_data *dd,
+                uint32_t instance_size, uint64_t rsd, struct mali_draw_packed *out)
+{
+   pan_pack(out, DRAW, cfg) {
+      cfg.state = rsd;
+      cfg.attributes = dd->attribs;
+      cfg.attribute_buffers = dd->attrib_bufs;
+      cfg.varyings = t->vs_vary;
+      cfg.varying_buffers = dd->vary_bufs;
+      cfg.thread_storage = t->tsd;
+      cfg.offset_start = dd->raw_vertex_offset;
+      cfg.instance_size = instance_size;
+      cfg.push_uniforms = t->vs_fau;
+      cfg.uniform_buffers = t->vs_tab.tables[MALI_V7_DESC_TABLE_UBO];
+      cfg.textures = t->vs_tab.tables[MALI_V7_DESC_TABLE_TEXTURE];
+      cfg.samplers = t->vs_tab.tables[MALI_V7_DESC_TABLE_SAMPLER];
+   }
+}
+
 static void
 draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di)
 {
@@ -1572,6 +1631,14 @@ draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di)
    /* Rasterizer discard: the Vertex job alone, as in panvk, which keeps
     * the Tiler job only for an occlusion query. */
    const bool tiling = !st->rs.rasterizer_discard_enable;
+   /* mali_tune.h idvs: a draw shading enough vertices runs the IDVS split
+    * as one Indexed Vertex job, so the varying shader runs only for the
+    * vertices of primitives that survive culling. The job is a tiler-side
+    * job, serialised with the next one, which costs a small draw more than
+    * it saves (idvsbench: ~8 us a draw, break-even near 175 vertices).
+    * An Indexed Vertex job always tiles: rasterizer discard keeps the
+    * plain pair. */
+   const bool idvs = t->vs_idvs_rsd && tiling && dd.vertex_range >= MALI_V7_IDVS_MIN_RANGE;
    if (unlikely(mali_tune_off & MALI_TUNE_PASSLOG))
       passlog_draw(cmd, p, di, &dd);
 
@@ -1612,7 +1679,8 @@ draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di)
     * among themselves (Dependency 2). With a barrier pending they are
     * linked first, so that it orders this draw's jobs after them. */
    const bool pending = c->pending != 0;
-   const bool defer = !pending;
+   /* An Indexed Vertex job is its own Tiler job: nothing to defer. */
+   const bool defer = !pending && !idvs;
    if (!defer)
       mali_v7_link_tilers(cmd, 0);
    cmd->jm.tiler_defer = defer;
@@ -1633,6 +1701,28 @@ draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di)
    if (tiling && dd.fs_ubo_copy &&
        !mali_v7_ubo_copy(cmd, c, p->fs, &cmd->gfx.desc, t->fs_fau, 0, &fs_ubo))
       goto fail;
+   if (idvs) {
+      /* One Indexed Vertex job (panvk_draw_prepare_idvs_job): the
+       * position shader runs for the vertices the indices name, the
+       * varying shader only for those of primitives that survive culling.
+       * Tiler side: Dependency 2 is the previous tiler-side job
+       * (mali_jm_cmd_buffer.c job_is_tiler_side). */
+      struct mali_ptr ij =
+         mali_jm_cmd_add_job(cmd, c, MALI_JOB_TYPE_INDEXED_VERTEX, pan_size(INDEXED_VERTEX_JOB),
+                             pending && !vs_dep && (fs_copy || fs_ubo), vs_dep);
+      cmd->jm.tiler_defer = false;
+      if (!ij.cpu)
+         return;
+      fill_tiler_sections(cmd, di, &dd, &invocation, instance_size, ij, t->idvs_prim0);
+      emit_vertex_dcd(
+         t, &dd, instance_size, t->vs_idvs_rsd,
+         (struct mali_draw_packed *)pan_section_ptr(ij.cpu, INDEXED_VERTEX_JOB, VERTEX_DRAW));
+      mali_jm_cmd_heap_use(cmd, (uint64_t)di->count * di->instance_count * 32);
+      cmd->jm.cur.draws++;
+      r->draws++;
+      cmd->draws++;
+      return;
+   }
    struct mali_ptr vj = mali_jm_cmd_add_job(cmd, c, MALI_JOB_TYPE_VERTEX, pan_size(COMPUTE_JOB),
                                             pending && !vs_dep && (fs_copy || fs_ubo), vs_dep);
    cmd->jm.tiler_defer = false;
@@ -1649,20 +1739,8 @@ draw(struct mali_cmd_buffer *cmd, const struct mali_draw_info *di)
    pan_section_pack(vj.cpu, COMPUTE_JOB, PARAMETERS, cfg) {
       cfg.job_task_split = 5;
    }
-   pan_section_pack(vj.cpu, COMPUTE_JOB, DRAW, cfg) {
-      cfg.state = t->vs_rsd;
-      cfg.attributes = dd.attribs;
-      cfg.attribute_buffers = dd.attrib_bufs;
-      cfg.varyings = t->vs_vary;
-      cfg.varying_buffers = dd.vary_bufs;
-      cfg.thread_storage = t->tsd;
-      cfg.offset_start = dd.raw_vertex_offset;
-      cfg.instance_size = instance_size;
-      cfg.push_uniforms = t->vs_fau;
-      cfg.uniform_buffers = t->vs_tab.tables[MALI_V7_DESC_TABLE_UBO];
-      cfg.textures = t->vs_tab.tables[MALI_V7_DESC_TABLE_TEXTURE];
-      cfg.samplers = t->vs_tab.tables[MALI_V7_DESC_TABLE_SAMPLER];
-   }
+   emit_vertex_dcd(t, &dd, instance_size, t->vs_rsd,
+                   (struct mali_draw_packed *)pan_section_ptr(vj.cpu, COMPUTE_JOB, DRAW));
 
    if (tiling) {
       struct mali_ptr tj = mali_cmd_alloc(cmd, pan_size(TILER_JOB), 128);
@@ -1787,6 +1865,12 @@ draw_indirect(struct mali_cmd_buffer *cmd, const struct idraw_call *call, uint32
    const struct vk_dynamic_graphics_state *st =
       p->bind.dynamic ? &cmd->vk.dynamic_graphics_state : &p->state;
    const struct mali_shader *vs = p->vs;
+
+   /* The patch job writes a Vertex and a Tiler job's fields. */
+   if (unlikely(vs->info.vs.idvs)) {
+      MALI_V7_UNSUPPORTED("an indirect draw with an IDVS vertex shader (debug.malisx2.tune idvs)");
+      return;
+   }
 
    /* Placeholders the patch job replaces: one vertex, one instance. */
    const struct mali_draw_info di = {.count = 1, .instance_count = 1, .indexed = call->indexed};

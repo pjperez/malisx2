@@ -495,6 +495,10 @@ struct mali_shader_compile_info {
     * early depth/stencil and pixel kill unless it writes depth or
     * stencil: it gets no ATEST in that case, as panvk's frame shaders. */
    bool meta;
+   /* v7: a vertex shader of an application pipeline, which the draws can
+    * run as an Indexed Vertex job (mali_tune.h idvs): compiled with IDVS
+    * when the compiler chooses it. Internal shaders keep Vertex jobs. */
+   bool idvs;
 };
 
 /* The fragment shader keeps its second colour output (location 0,
