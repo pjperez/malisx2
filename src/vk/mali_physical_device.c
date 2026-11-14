@@ -542,6 +542,21 @@ ubo_std_layout_for_arch(uint32_t arch)
    return arch == 7 || arch == 9 || arch == 11;
 }
 
+/*
+ * VK_KHR_shader_float_controls on v7: Bifrost's conversions keep fp16 and
+ * fp32 denormals and round to nearest even unless a shader asks otherwise
+ * (bdatest f16dn: packHalf2x16 and unpackHalf2x16 of fp16 subnormals give
+ * the exact halves and values). Reported as preserving, as panvk reports
+ * v7; the flush-to-zero and round-toward-zero modes are not claimed, as
+ * they are not checked here. Vita3K builds subnormal halves in software on
+ * every F16 pack when a driver does not say it preserves them.
+ */
+static bool
+float_controls_for_arch(uint32_t arch)
+{
+   return arch == 7;
+}
+
 /* maxDrawIndirectCount. v11: the stream compares the count as a signed
  * word. v7, v9: the smallest limit Vulkan allows with multiDrawIndirect,
  * which bounds what one call records. */
@@ -567,6 +582,7 @@ device_extensions_for_arch(uint32_t arch)
 
    ext.KHR_buffer_device_address = bda_for_arch(arch);
    ext.KHR_uniform_buffer_standard_layout = ubo_std_layout_for_arch(arch);
+   ext.KHR_shader_float_controls = float_controls_for_arch(arch);
    return ext;
 }
 
@@ -1090,6 +1106,16 @@ get_properties(const struct mali_physical_device *pdev, const char *name,
 
       /* VK_EXT_provoking_vertex: the hardware bit is per render pass, not
        * per pipeline (panvk reports the same). */
+      /* VK_KHR_shader_float_controls (float_controls_for_arch) */
+      .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
+      .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
+      .shaderSignedZeroInfNanPreserveFloat16 = float_controls_for_arch(p->arch_major),
+      .shaderSignedZeroInfNanPreserveFloat32 = float_controls_for_arch(p->arch_major),
+      .shaderDenormPreserveFloat16 = float_controls_for_arch(p->arch_major),
+      .shaderDenormPreserveFloat32 = float_controls_for_arch(p->arch_major),
+      .shaderRoundingModeRTEFloat16 = float_controls_for_arch(p->arch_major),
+      .shaderRoundingModeRTEFloat32 = float_controls_for_arch(p->arch_major),
+
       .provokingVertexModePerPipeline = false,
       .transformFeedbackPreservesTriangleFanProvokingVertex = false,
 
