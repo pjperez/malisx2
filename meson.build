@@ -50,13 +50,14 @@ add_languages('rust', required : true, native : true)
 rustc = meson.get_compiler('rust')
 rust = import('rust')
 
-# Mesa: branch malisx2 of github.com/bmdhacks/armsx2-turnip (upstream Mesa
-# plus our kraid changes) at this commit, checked out (or symlinked) at
-# mesa/. Only the sources are used; Mesa's own build is not run.
+# Mesa: branch malisx2-scoreboard-slots of github.com/pjperez/armsx2-turnip
+# (bmdhacks/armsx2-turnip's malisx2, upstream Mesa plus our kraid changes,
+# with the scoreboard slots commit) at this commit, checked out (or
+# symlinked) at mesa/. Only the sources are used; Mesa's own build is not run.
 mesa_commit = '62c144bf585d13a63f7681040878c833bf11e9c6'
 if not fs.is_dir('mesa' / 'src' / 'panfrost')
   error('''Mesa is missing. Fetch it with:
-  git init mesa && git -C mesa fetch --depth 1 https://github.com/bmdhacks/armsx2-turnip.git @0@ && git -C mesa checkout FETCH_HEAD'''.format(mesa_commit))
+  git init mesa && git -C mesa fetch --depth 1 https://github.com/pjperez/armsx2-turnip.git @0@ && git -C mesa checkout FETCH_HEAD'''.format(mesa_commit))
 endif
 _mesa_head = run_command('git', '-C', meson.project_source_root() / 'mesa',
                          'rev-parse', 'HEAD', check : false)

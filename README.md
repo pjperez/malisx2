@@ -14,12 +14,12 @@ driver is built on Mesa's shared Vulkan runtime.
 ## Building
 
 The driver builds against Mesa sources checked out at `mesa/`: branch
-`malisx2` of [bmdhacks/armsx2-turnip](https://github.com/bmdhacks/armsx2-turnip)
-at the commit `meson.build` pins (`mesa_commit`). Only the sources are used;
+`malisx2-scoreboard-slots` of [pjperez/armsx2-turnip](https://github.com/pjperez/armsx2-turnip)
+(bmdhacks/armsx2-turnip's `malisx2` plus one commit) at the commit `meson.build` pins (`mesa_commit`). Only the sources are used;
 this repository's `mesa-glue/` builds the parts the driver needs.
 
     git init mesa
-    git -C mesa fetch --depth 1 https://github.com/bmdhacks/armsx2-turnip.git <mesa_commit>
+    git -C mesa fetch --depth 1 https://github.com/pjperez/armsx2-turnip.git <mesa_commit>
     git -C mesa checkout FETCH_HEAD
 
 Host (Linux):
