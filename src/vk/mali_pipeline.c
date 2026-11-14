@@ -905,7 +905,7 @@ create_graphics_pipeline(struct mali_device *dev, VkPipelineCache cache_handle,
 
    /* Keys. The tune words that change compiled shaders are in both. */
    const uint32_t tune =
-      mali_tune_off & (MALI_TUNE_NO_UBO_PUSH | MALI_TUNE_NO_LOAD_ALIGN);
+      mali_tune_off & (MALI_TUNE_NO_UBO_PUSH | MALI_TUNE_NO_LOAD_ALIGN | MALI_TUNE_SB_SLOTS);
    /* The IDVS vertex stage (below) is keyed with the bit; the plain one
     * without, so turning idvs on keeps every plain vertex shader cached. */
    const uint32_t vs_tune = tune;

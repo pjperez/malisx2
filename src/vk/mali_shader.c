@@ -2320,6 +2320,7 @@ MALI_PER_ARCH(shader_compile)(struct mali_device *dev,
       .view_mask = (state && state->rp && state->mv) ? state->mv->view_mask : 0,
       .robust_modes = robust_modes,
       .robust_descriptors = dev->vk.enabled_features.nullDescriptor,
+      .scoreboard_slots = mali_tune_off & MALI_TUNE_SB_SLOTS,
 #if PAN_ARCH < 9
       /* A plain vertex shader per Vertex job unless an application
        * pipeline asked for IDVS (mali_tune.h idvs): then the compiler

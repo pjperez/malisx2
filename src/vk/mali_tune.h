@@ -27,6 +27,12 @@
  *   shaderstats  diagnostic: each shader read back from the pipeline cache
  *                logged with its code size, registers, thread storage
  *                (spills) and interface counts
+ *   sbslots      v7: Bifrost scoreboard slots by kind (bi_scoreboard.c):
+ *                a warp's loads, textures and varyings no longer wait for
+ *                each other unless they must; unset, Mesa's scheme (every
+ *                varying load, memory load, store and atomic one at a time
+ *                on slot 0). Sonic's attract sequence: no measured change
+ *                (2026-11-14)
  *   idvs         v7: application pipelines also get their vertex shader
  *                split for index-driven vertex shading, and a direct draw
  *                of at least MALI_V7_IDVS_MIN_RANGE vertices runs it as an
@@ -41,6 +47,7 @@ enum mali_tune_off {
    MALI_TUNE_DEPLOG = 1u << 4,
    MALI_TUNE_SHADERSTATS = 1u << 5,
    MALI_TUNE_IDVS = 1u << 6,
+   MALI_TUNE_SB_SLOTS = 1u << 7,
 };
 extern uint32_t mali_tune_off __attribute__((visibility("hidden")));
 /* Read the words and set mali_tune_off and mali_crc_options.disable
